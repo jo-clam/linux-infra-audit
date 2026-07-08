@@ -1,0 +1,6 @@
+# Reportes generados — contienen datos sensibles del servidor, NUNCA subirlos
+infra_audit_*.txt
+*.sql
+mysqltuner.pl
+__pycache__/
+*.pyc
