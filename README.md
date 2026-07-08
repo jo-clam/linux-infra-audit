@@ -25,10 +25,43 @@ Al final produce un **resumen ejecutivo** con hallazgos críticos, advertencias 
 - Ejecutar como **root**
 - Opcional: `perl` (para MySQLTuner), acceso MySQL como root sin contraseña interactiva (usa `~/.my.cnf` o socket auth)
 
+## Instalación en el servidor
+
+Elige **una** de las tres opciones. Todas requieren salida HTTPS hacia GitHub
+(verificar: `curl -sI https://raw.githubusercontent.com | head -1` — debe responder algo, no quedarse colgado).
+
+### Opción A — wget
+
+```bash
+wget -O /root/infra_audit.py https://raw.githubusercontent.com/jo-clam/infra/main/infra_audit.py
+chmod +x /root/infra_audit.py
+```
+
+Para actualizar a la última versión, repetir el mismo comando (sobrescribe el archivo).
+
+### Opción B — curl
+
+```bash
+curl -o /root/infra_audit.py https://raw.githubusercontent.com/jo-clam/infra/main/infra_audit.py
+chmod +x /root/infra_audit.py
+```
+
+### Opción C — git clone (con historial, actualiza con git pull)
+
+```bash
+git clone https://github.com/jo-clam/infra.git /root/infra-audit
+# actualizar más tarde:
+cd /root/infra-audit && git pull
+```
+
 ## Uso
 
 ```bash
-sudo python3 infra_audit.py
+# Si descargaste con wget o curl (opciones A/B):
+sudo python3 /root/infra_audit.py
+
+# Si clonaste con git (opción C):
+sudo python3 /root/infra-audit/infra_audit.py
 ```
 
 Salidas:
