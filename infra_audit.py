@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# Linux Infra Audit Tool v1.0 — Python Edition
+# Linux Infra Audit Tool v1.1 — Python Edition
 # Auditoría de saturación para servidores web/BD (cPanel, Ubuntu, etc.)
 # Compatible: CentOS 7/8, RHEL 8, AlmaLinux/CloudLinux 8, Ubuntu 20/22, Debian 10/11
 #
@@ -218,7 +218,7 @@ def header():
     except Exception:
         ip = "N/A"
     w(); w("═"*62)
-    w(f"   LINUX INFRA AUDIT TOOL v1.0")
+    w(f"   LINUX INFRA AUDIT TOOL v1.1")
     w(f"   Auditoría de Infraestructura y Saturación")
     w(f"   Servidor : {host}")
     w(f"   IP       : {ip}")
@@ -388,7 +388,7 @@ def check_top_consumers():
     # Conexiones web por IP — floods/ataques saturan Apache y PHP-FPM
     sub("CONEXIONES ESTABLECIDAS A :80/:443 POR IP (detecta floods)")
     conns, rc = run("ss -Htn state established '( sport = :80 or sport = :443 )' 2>/dev/null "
-                    "| awk '{print $4}' | sed 's/.*[]:]//;s/^\\[//' "
+                    "| awk '{print $4}' | sed -E 's/:[0-9]+$//; s/^\\[|\\]$//g; s/^::ffff://' "
                     "| sort | uniq -c | sort -rn | head -12")
     if rc != 0 or not conns:
         conns, _ = run("netstat -tn 2>/dev/null | grep -E ':(80|443) ' | grep ESTABLISHED "
@@ -652,7 +652,7 @@ def check_mysql():
         ok("Sin queries activas de más de 10 segundos")
 
     sub("THREADS EN TIEMPO REAL")
-    threads = mysql_q("SHOW STATUS LIKE 'Threads_%';")
+    threads = mysql_q("SHOW GLOBAL STATUS LIKE 'Threads_%';")
     if threads: w(threads)
 
     sub("VARIABLES CLAVE DE CONFIGURACIÓN")
@@ -669,14 +669,14 @@ def check_mysql():
     for var in ["Innodb_buffer_pool_reads","Innodb_buffer_pool_read_requests",
                 "Slow_queries","Questions","Aborted_connects","Table_locks_waited",
                 "Max_used_connections","Created_tmp_disk_tables","Created_tmp_tables"]:
-        val = mysql_q(f"SHOW STATUS LIKE '{var}';")
+        val = mysql_q(f"SHOW GLOBAL STATUS LIKE '{var}';")
         if val:
             w(f"  {val.splitlines()[-1]}")
 
     # Eficiencia buffer pool
     sub("EFICIENCIA BUFFER POOL InnoDB")
-    bp_r, _ = run("mysql --connect-timeout=5 -e \"SHOW STATUS LIKE 'Innodb_buffer_pool_reads';\" 2>/dev/null | awk 'NR==2{print $2}'")
-    bp_rq, _ = run("mysql --connect-timeout=5 -e \"SHOW STATUS LIKE 'Innodb_buffer_pool_read_requests';\" 2>/dev/null | awk 'NR==2{print $2}'")
+    bp_r, _ = run("mysql --connect-timeout=5 -e \"SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_reads';\" 2>/dev/null | awk 'NR==2{print $2}'")
+    bp_rq, _ = run("mysql --connect-timeout=5 -e \"SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read_requests';\" 2>/dev/null | awk 'NR==2{print $2}'")
     try:
         reads = int(bp_r.strip())
         reqs  = int(bp_rq.strip())
@@ -708,6 +708,8 @@ def check_mysql():
         if bp_mb < data_mb:
             crit(f"Buffer pool ({bp_mb} MB) < datos InnoDB ({data_mb} MB) — lee disco constantemente")
             rec(f"Objetivo: innodb_buffer_pool_size cercano a {data_mb}M — PERO validar antes que la RAM libre lo permite (ver sección 2). No asignar más del ~50-60% de la RAM en un servidor compartido con PHP-FPM.")
+        elif data_mb == 0:
+            info(f"Datos InnoDB reportados como 0 MB — resultado dudoso, verificar manualmente antes de tocar el buffer pool")
         else:
             ok(f"Buffer pool ({bp_mb} MB) cubre los datos InnoDB ({data_mb} MB)")
     except Exception:
@@ -721,7 +723,11 @@ def check_mysql():
                       "FROM information_schema.tables "
                       "WHERE table_type NOT LIKE '%view%' "
                       "GROUP BY table_schema ORDER BY 2 DESC;")
-    if db_size: w(db_size)
+    if db_size:
+        w(db_size)
+    else:
+        info("La consulta de tamaños no devolvió resultados — verificar manualmente:")
+        info("  mysql -e \"SELECT table_schema, ROUND(SUM(data_length+index_length)/1048576,1) MB FROM information_schema.tables GROUP BY 1 ORDER BY 2 DESC;\"")
 
     # Tablas MyISAM
     sub("TABLAS MyISAM (motor obsoleto — bloqueo tabla completa)")
@@ -751,7 +757,7 @@ def check_mysql():
                             "ORDER BY table_schema, table_name;")
         if sql_cmds:
             with open(SQL_FILE, "w") as f:
-                f.write("-- Linux Infra Audit Tool v1.0\n")
+                f.write("-- Linux Infra Audit Tool v1.1\n")
                 f.write(f"-- Generado: {datetime.datetime.now()}\n")
                 f.write("-- ⚠ EJECUTAR EN VENTANA DE MANTENIMIENTO\n")
                 f.write("-- ⚠ SUPUESTOS: hay backup verificado y espacio libre en disco\n")
@@ -785,7 +791,7 @@ def check_mysql():
 
     # Joins sin índice
     sub("JOINS SIN ÍNDICE (acumulado desde inicio)")
-    joins = mysql_q("SHOW STATUS LIKE 'Select_full_join';")
+    joins = mysql_q("SHOW GLOBAL STATUS LIKE 'Select_full_join';")
     if joins:
         w(joins)
         for line in joins.splitlines():
@@ -829,7 +835,10 @@ def check_mysql():
                 rec(f"curl -o {TUNER} {TUNER_URL}")
         if os.path.exists(TUNER):
             info("Ejecutando MySQLTuner (puede tardar ~30s)...")
-            tuner_out, _ = run(f"perl {TUNER} --nogood --nowarn 2>/dev/null", timeout=120)
+            tuner_out, _ = run(f"perl {TUNER} --silent 2>/dev/null", timeout=180)
+            if not tuner_out or "Usage Guidelines" in tuner_out or "perldoc" in tuner_out:
+                # versiones nuevas rechazan/ignoran ciertos flags — reintentar sin flags
+                tuner_out, _ = run(f"perl {TUNER} 2>/dev/null", timeout=180)
             if tuner_out:
                 w(tuner_out)
             else:
@@ -947,15 +956,23 @@ def check_phpfpm(total_mb):
                         rec(f"Valor sugerido ~{safe} (editar {conf} y systemctl reload de la versión FPM — NO usar sed sin backup previo del archivo)")
 
     sub("PHP.ini — CONFIGURACIÓN CRÍTICA")
-    php_bin = shutil.which("php") or shutil.which("php74") or shutil.which("php81")
+    # En cPanel/EA4, 'php' en PATH puede ser un wrapper php-cgi que no soporta -r.
+    # Preferir el binario CLI real de la versión EA4 más alta instalada.
+    ea_bins = sorted(glob.glob("/opt/cpanel/ea-php*/root/usr/bin/php"), reverse=True)
+    php_bin = (ea_bins[0] if ea_bins else None) or shutil.which("php") \
+              or shutil.which("php74") or shutil.which("php81")
     if php_bin:
-        php_vars, _ = run(f"{php_bin} -r \"echo ini_get('memory_limit').'|'.ini_get('max_execution_time').'|'.ini_get('upload_max_filesize').'|'.ini_get('post_max_size').'|'.(extension_loaded('Zend OPcache') && ini_get('opcache.enable') ? '1' : '0');\" 2>/dev/null")
-        if php_vars:
+        info(f"Binario usado: {php_bin}")
+        php_vars, rc_php = run(f"{php_bin} -r \"echo ini_get('memory_limit').'|'.ini_get('max_execution_time').'|'.ini_get('upload_max_filesize').'|'.ini_get('post_max_size').'|'.(extension_loaded('Zend OPcache') && ini_get('opcache.enable') ? '1' : '0');\" 2>/dev/null")
+        if rc_php != 0 or not php_vars or php_vars.count("|") != 4 or "Usage" in php_vars:
+            warn("No se pudo leer php.ini vía CLI (el binario no soporta -r o falló)")
+            rec(f"Verificar manualmente: {php_bin} -i | grep -E 'memory_limit|max_execution_time|opcache.enable'")
+        else:
             parts  = php_vars.split("|")
             labels = ["memory_limit","max_execution_time","upload_max_filesize","post_max_size","opcache"]
             info("NOTA: valores del PHP CLI — el FPM de cada versión/pool puede diferir")
             for i, label in enumerate(labels):
-                val = parts[i] if i < len(parts) else "N/A"
+                val = parts[i].strip() if i < len(parts) else "N/A"
                 info(f"  {label:<25}: {val}")
                 if label == "memory_limit":
                     digits = re.sub(r"[^0-9]", "", val)
@@ -965,13 +982,16 @@ def check_phpfpm(total_mb):
                 if label == "max_execution_time" and val.isdigit() and int(val) >= 1800:
                     warn(f"max_execution_time muy alto ({val}s)")
                     rec("Reducir a 120-300 segundos")
-                if label == "opcache" and val == "0":
-                    warn("OPcache no activo en CLI (verificar también en FPM: php-fpm -i | grep opcache)")
-                    rec("Activar en php.ini: opcache.enable=1  (reduce CPU notablemente)")
-                elif label == "opcache":
-                    ok("OPcache activo (CLI)")
+                if label == "opcache":
+                    if val == "1":
+                        ok("OPcache activo (CLI)")
+                    elif val == "0":
+                        warn("OPcache no activo en CLI (verificar también en FPM)")
+                        rec("Activar en php.ini: opcache.enable=1  (reduce CPU notablemente)")
+                    else:
+                        info("OPcache: estado no determinado desde CLI")
     else:
-        info("PHP CLI no disponible en PATH")
+        info("PHP CLI no disponible")
 
 # ============================================================
 # 6. SERVIDOR WEB
